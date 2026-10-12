@@ -1,0 +1,159 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>My Books</title>
+<style>
+  :root{--bg:#F2F4F1;--ink:#1D2B2A;--mute:#5E6D6B;--line:#D5DBD6;--accent:#1F6F6B;--flag:#B7791F;--card:#FFFFFF}
+  *{box-sizing:border-box}
+  body{margin:0;padding:max(16px,env(safe-area-inset-top)) 16px max(24px,env(safe-area-inset-bottom));background:var(--bg);color:var(--ink);font:16px/1.45 -apple-system,system-ui,sans-serif;max-width:560px;margin-inline:auto}
+  header{display:flex;align-items:baseline;justify-content:space-between;margin-bottom:14px}
+  h1{font:600 28px/1.1 "Iowan Old Style",Georgia,serif;margin:0}
+  #count{color:var(--mute);font-size:14px}
+  #reader{width:100%;border-radius:10px;overflow:hidden;margin-bottom:10px}
+  .row{display:flex;gap:8px;margin-bottom:10px}
+  button,input{font:inherit;border-radius:10px;border:1px solid var(--line);padding:12px 14px}
+  button{background:var(--accent);color:#fff;border-color:var(--accent);font-weight:600;cursor:pointer}
+  button.ghost{background:transparent;color:var(--accent)}
+  button:focus-visible,input:focus-visible{outline:3px solid var(--flag);outline-offset:2px}
+  input{flex:1;min-width:0;background:var(--card);color:var(--ink)}
+  #scanBtn{flex:1}
+  #status{min-height:22px;color:var(--mute);font-size:14px;margin:0 0 12px}
+  ul{list-style:none;margin:0;padding:0}
+  li{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:12px 14px;margin-bottom:8px}
+  li h2{font:600 17px/1.25 "Iowan Old Style",Georgia,serif;margin:0}
+  .meta{color:var(--mute);font-size:14px;margin-top:2px}
+  .tags{display:flex;flex-wrap:wrap;gap:6px;margin-top:8px}
+  .tag{font-size:13px;padding:2px 9px;border-radius:99px;border:1px solid var(--flag);color:var(--flag)}
+  .tag.dup{background:var(--flag);color:#fff}
+  .del{background:none;border:none;color:var(--mute);padding:4px 0;margin-top:6px;font-weight:400;font-size:14px}
+  .empty{color:var(--mute);text-align:center;padding:24px 0}
+</style>
+</head>
+<body>
+<header><h1>My Books</h1><span id="count"></span></header>
+
+<div id="reader"></div>
+<div class="row"><button id="scanBtn">Scan barcode</button></div>
+<div class="row">
+  <input id="isbn" placeholder="Or type an ISBN" inputmode="numeric" aria-label="ISBN">
+  <button id="addBtn" class="ghost">Add book</button>
+</div>
+<p id="status" role="status"></p>
+<ul id="list"></ul>
+<div class="row"><button id="exportBtn" class="ghost">Export my books</button></div>
+
+<script src="https://cdn.jsdelivr.net/npm/html5-qrcode@2.3.8/html5-qrcode.min.js"></script>
+<script>
+const KEY = 'books-v1';
+const SPECIAL = ['anniversary','collector','illustrated','deluxe','limited','signed','special edition','annotated','leatherbound','slipcase','exclusive'];
+const $ = id => document.getElementById(id);
+let books = load(), scanner = null, busy = false;
+
+function load(){ try { return JSON.parse(localStorage.getItem(KEY)) || []; } catch(e){ return []; } }
+function save(){ try { localStorage.setItem(KEY, JSON.stringify(books)); } catch(e){} }
+function status(t){ $('status').textContent = t; }
+const norm = s => (s||'').toLowerCase().replace(/^the /,'').replace(/[^a-z0-9 ]/g,'').trim();
+
+function specialTags(b){
+  const t = [b.title, b.subtitle, b.edition_name, b.publisher].join(' ').toLowerCase();
+  return SPECIAL.filter(w => t.includes(w));
+}
+function isDuplicate(b, i){
+  return books.some((o, j) => j !== i && (
+    (b.work && o.work === b.work) ||
+    (norm(b.author) && norm(o.title) === norm(b.title) && norm(o.author) === norm(b.author))
+  ));
+}
+
+async function lookup(isbn){
+  const r = await fetch('https://openlibrary.org/isbn/' + isbn + '.json');
+  if (!r.ok) throw new Error('not found');
+  const e = await r.json();
+  const work = (e.works && e.works[0] && e.works[0].key) || '';
+  let author = '';
+  try {
+    let key = e.authors && e.authors[0] && e.authors[0].key;
+    if (!key && work){
+      const w = await (await fetch('https://openlibrary.org' + work + '.json')).json();
+      key = w.authors && w.authors[0] && w.authors[0].author && w.authors[0].author.key;
+    }
+    if (key) author = (await (await fetch('https://openlibrary.org' + key + '.json')).json()).name || '';
+  } catch(_){}
+  const year = ((e.publish_date || '').match(/\d{4}/) || [''])[0];
+  return { isbn, title: e.title || 'Unknown title', subtitle: e.subtitle || '', author,
+           publisher: (e.publishers || [])[0] || '', year, format: e.physical_format || '',
+           edition_name: e.edition_name || '', work };
+}
+
+async function add(raw){
+  const isbn = raw.replace(/[^0-9Xx]/g,'').toUpperCase();
+  if (isbn.length !== 10 && isbn.length !== 13) return status('That doesn’t look like an ISBN. Check the number and try again.');
+  if (busy) return;
+  busy = true; status('Looking up ' + isbn + '…');
+  try {
+    const b = await lookup(isbn);
+    books.unshift(b); save(); render();
+    status('Added: ' + b.title);
+    $('isbn').value = '';
+  } catch(e){
+    status('Open Library has no match for ' + isbn + '. Try typing it in, or scan another book.');
+  }
+  busy = false;
+}
+
+function render(){
+  $('count').textContent = books.length + (books.length === 1 ? ' book' : ' books');
+  const ul = $('list'); ul.innerHTML = '';
+  if (!books.length){ ul.innerHTML = '<p class="empty">No books yet. Scan a barcode to add your first.</p>'; return; }
+  books.forEach((b, i) => {
+    const li = document.createElement('li');
+    const h = document.createElement('h2'); h.textContent = b.title + (b.subtitle ? ': ' + b.subtitle : '');
+    const m = document.createElement('div'); m.className = 'meta';
+    m.textContent = [b.author, b.publisher, b.year, b.format].filter(Boolean).join(', ') || b.isbn;
+    li.append(h, m);
+    const tags = document.createElement('div'); tags.className = 'tags';
+    if (isDuplicate(b, i)) tags.append(tag('Possible duplicate', true));
+    specialTags(b).forEach(w => tags.append(tag('Special: ' + w)));
+    if (tags.children.length) li.append(tags);
+    const d = document.createElement('button'); d.className = 'del'; d.textContent = 'Remove';
+    d.onclick = () => { books.splice(i, 1); save(); render(); };
+    li.append(d); ul.append(li);
+  });
+}
+function tag(t, dup){ const s = document.createElement('span'); s.className = 'tag' + (dup ? ' dup' : ''); s.textContent = t; return s; }
+
+async function stopScan(){
+  if (!scanner) return;
+  const s = scanner; scanner = null;
+  try { await s.stop(); s.clear(); } catch(_){}
+  $('scanBtn').textContent = 'Scan barcode';
+}
+async function startScan(){
+  if (scanner) return stopScan();
+  scanner = new Html5Qrcode('reader');
+  try {
+    await scanner.start({ facingMode: 'environment' },
+      { fps: 10, qrbox: { width: 260, height: 130 }, formatsToSupport: [Html5QrcodeSupportedFormats.EAN_13] },
+      async text => { await stopScan(); add(text); }, () => {});
+    $('scanBtn').textContent = 'Stop scanning';
+    status('Point the camera at the barcode on the back cover.');
+  } catch(e){
+    scanner = null;
+    status('Can’t open the camera. Allow camera access for this site in Safari settings, then try again.');
+  }
+}
+
+$('scanBtn').onclick = startScan;
+$('addBtn').onclick = () => add($('isbn').value);
+$('isbn').addEventListener('keydown', e => { if (e.key === 'Enter') add($('isbn').value); });
+$('exportBtn').onclick = () => {
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(new Blob([JSON.stringify(books, null, 2)], { type: 'application/json' }));
+  a.download = 'my-books.json'; a.click();
+};
+render();
+</script>
+</body>
+</html>
